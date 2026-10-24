@@ -1,4 +1,4 @@
--- AutoBuy Tycoon v6 (UI + TP, auto-detect base, TP menapak, diagnosis)
+-- AutoBuy Tycoon v7 (UI + TP raycast + tweak tinggi, auto-detect base)
 local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
 local LP = Players.LocalPlayer
@@ -42,7 +42,7 @@ local CONFIG = {
     VerifyDelay   = 0.5,
     BlacklistTime = 5,
     UseColorGate  = true,  -- uang tak terbaca: beli hanya tombol hijau
-    TpLift        = 1.8,   -- naikkan kalau TP masih terlalu rendah
+    TpLift        = getgenv().AutoBuyLift or 0, -- setel lewat tombol - dan + di UI
     SkipNames     = { "gamepass", "robux", "shield" }, -- huruf kecil
 }
 
@@ -58,15 +58,33 @@ local function getHRP()
     return char:WaitForChild("HumanoidRootPart", 10)
 end
 
--- Posisi berdiri tepat di atas permukaan part
+-- Posisi berdiri tepat di atas permukaan part (tahan rotasi dan bentuk)
 local function standCFrame(part, hrp)
     local hum = hrp.Parent and hrp.Parent:FindFirstChildOfClass("Humanoid")
     local hip = 2
     if hum then
         hip = (hum.RigType == Enum.HumanoidRigType.R6) and 2 or hum.HipHeight
     end
-    local top = (part.CFrame * CFrame.new(0, part.Size.Y / 2, 0)).Position
-    return CFrame.new(top + Vector3.new(0, hip + hrp.Size.Y / 2 + CONFIG.TpLift, 0))
+
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Include
+    params.FilterDescendantsInstances = { part }
+    local hit = workspace:Raycast(
+        part.Position + Vector3.new(0, 30, 0), Vector3.new(0, -60, 0), params)
+
+    local topY
+    if hit then
+        topY = hit.Position.Y
+    else
+        local _, _, _, _, _, _, r10, r11, r12 = part.CFrame:GetComponents()
+        topY = part.Position.Y + (math.abs(r10) * part.Size.X
+            + math.abs(r11) * part.Size.Y + math.abs(r12) * part.Size.Z) / 2
+    end
+
+    local rot = hrp.CFrame - hrp.CFrame.Position -- pertahankan arah hadap
+    local pos = Vector3.new(part.Position.X,
+        topY + hip + hrp.Size.Y / 2 + CONFIG.TpLift, part.Position.Z)
+    return CFrame.new(pos) * rot
 end
 
 local function getCash()
@@ -297,7 +315,7 @@ gui.DisplayOrder = 999
 local okParent = pcall(function() gui.Parent = parentGui end)
 if not okParent or not gui.Parent then gui.Parent = LP:WaitForChild("PlayerGui") end
 
-local FULL_H = 284
+local FULL_H = 322
 local frame = Instance.new("Frame")
 frame.Size = UDim2.fromOffset(236, FULL_H)
 frame.Position = UDim2.new(0, 10, 0.2, 0)
@@ -310,7 +328,7 @@ local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, -64, 0, 28)
 title.Position = UDim2.fromOffset(8, 0)
 title.BackgroundTransparency = 1
-title.Text = "AutoBuy v6"
+title.Text = "AutoBuy v7"
 title.TextColor3 = Color3.fromRGB(235, 235, 235)
 title.TextXAlignment = Enum.TextXAlignment.Left
 title.Font = Enum.Font.GothamBold
@@ -364,6 +382,41 @@ mkButton("Tutup dan Stop", 208, Color3.fromRGB(150, 60, 60), function()
     getgenv().AutoBuyStop = true
     gui:Destroy()
 end)
+
+-- Tweak tinggi TP (live): tombol - dan +
+local function mkSmall(text, pos, callback)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.fromOffset(40, 30)
+    b.Position = pos
+    b.BackgroundColor3 = Color3.fromRGB(70, 76, 92)
+    b.Text = text
+    b.TextColor3 = Color3.new(1, 1, 1)
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 18
+    b.Parent = body
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+    b.MouseButton1Click:Connect(callback)
+    return b
+end
+
+local liftLabel = Instance.new("TextLabel")
+liftLabel.Size = UDim2.new(1, -104, 0, 30)
+liftLabel.Position = UDim2.fromOffset(52, 244)
+liftLabel.BackgroundTransparency = 1
+liftLabel.TextColor3 = Color3.fromRGB(220, 224, 232)
+liftLabel.Font = Enum.Font.GothamSemibold
+liftLabel.TextSize = 12
+liftLabel.Parent = body
+
+local function setLift(v)
+    CONFIG.TpLift = math.floor(v * 10 + 0.5) / 10
+    getgenv().AutoBuyLift = CONFIG.TpLift
+    liftLabel.Text = "Tinggi TP: " .. CONFIG.TpLift
+end
+setLift(CONFIG.TpLift)
+
+mkSmall("-", UDim2.fromOffset(8, 244), function() setLift(CONFIG.TpLift - 0.2) end)
+mkSmall("+", UDim2.new(1, -48, 0, 244), function() setLift(CONFIG.TpLift + 0.2) end)
 
 local miniBtn = Instance.new("TextButton")
 miniBtn.Size = UDim2.fromOffset(26, 22)
