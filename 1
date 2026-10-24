@@ -1,4 +1,4 @@
--- AutoBuy Tycoon v5 (UI + TP, auto-detect base)
+-- AutoBuy Tycoon v6 (UI + TP, auto-detect base, TP menapak, diagnosis)
 local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
 local LP = Players.LocalPlayer
@@ -41,20 +41,32 @@ local CONFIG = {
     TouchDelay    = 0.2,
     VerifyDelay   = 0.5,
     BlacklistTime = 5,
-    CheapestFirst = true,
-    UseColorGate  = true, -- uang tak terbaca: beli hanya tombol hijau
+    UseColorGate  = true,  -- uang tak terbaca: beli hanya tombol hijau
+    TpLift        = 0.3,   -- naikkan kalau TP masih terlalu rendah
     SkipNames     = { "gamepass", "robux", "shield" }, -- huruf kecil
 }
 
 local state = {
     Enabled = true, Stop = false,
     Bought = 0, Status = "Siap", TpIndex = 0,
+    Total = 0, Priced = 0, Afford = 0,
 }
 
 ---------------------------------------------------------------- util
 local function getHRP()
     local char = LP.Character or LP.CharacterAdded:Wait()
     return char:WaitForChild("HumanoidRootPart", 10)
+end
+
+-- Posisi berdiri tepat di atas permukaan part
+local function standCFrame(part, hrp)
+    local hum = hrp.Parent and hrp.Parent:FindFirstChildOfClass("Humanoid")
+    local hip = 2
+    if hum then
+        hip = (hum.RigType == Enum.HumanoidRigType.R6) and 2 or hum.HipHeight
+    end
+    local top = (part.CFrame * CFrame.new(0, part.Size.Y / 2, 0)).Position
+    return CFrame.new(top + Vector3.new(0, hip + hrp.Size.Y / 2 + CONFIG.TpLift, 0))
 end
 
 local function getCash()
@@ -157,7 +169,7 @@ local function doTouch(hrp, part, method)
         firetouchinterest(hrp, part, 1)
     else
         local old = hrp.CFrame
-        hrp.CFrame = part.CFrame + Vector3.new(0, 3, 0)
+        hrp.CFrame = standCFrame(part, hrp)
         task.wait(CONFIG.TouchDelay + 0.15)
         hrp.CFrame = old
     end
@@ -194,19 +206,28 @@ local function step()
     local cash = getCash()
     local now = os.clock()
 
+    local list = listButtons()
+    state.Total = #folder:GetChildren()
+    state.Priced = 0
+
     local candidates = {}
-    for _, item in ipairs(listButtons()) do
-        local st = attempts[item.inst]
-        if item.price and not (st and st.blockedUntil > now) then
-            local afford
-            if cash ~= nil then
-                afford = cash >= item.price
-            else
-                afford = (not CONFIG.UseColorGate) or isGreen(item.part)
+    for _, item in ipairs(list) do
+        if item.price then
+            state.Priced += 1
+            local st = attempts[item.inst]
+            if not (st and st.blockedUntil > now) then
+                local afford
+                if cash ~= nil then
+                    afford = cash >= item.price
+                else
+                    afford = (not CONFIG.UseColorGate) or isGreen(item.part)
+                end
+                if afford then table.insert(candidates, item) end
             end
-            if afford then table.insert(candidates, item) end
         end
     end
+    state.Afford = #candidates
+
     if #candidates == 0 then
         state.Status = "Menunggu uang / tombol"
         return
@@ -234,7 +255,7 @@ local function tpNextButton()
     end
     state.TpIndex = state.TpIndex % #list + 1
     local item = list[state.TpIndex]
-    hrp.CFrame = item.part.CFrame + Vector3.new(0, 4, 0)
+    hrp.CFrame = standCFrame(item.part, hrp)
     state.Status = ("TP %d/%d: %s"):format(state.TpIndex, #list, item.inst.Name)
 end
 
@@ -245,7 +266,7 @@ local function tpBase()
     local ess = tycoon:FindFirstChild("Essentials")
     local sp = ess and ess:FindFirstChild("BaseSpawn")
     if sp and sp:IsA("BasePart") then
-        target = sp.CFrame + Vector3.new(0, 4, 0)
+        target = standCFrame(sp, hrp)
     else
         local ok, cf = pcall(function() return tycoon:GetPivot() end)
         if ok then target = cf + Vector3.new(0, 6, 0) end
@@ -274,11 +295,12 @@ gui.Name = "AutoBuyUI"
 gui.ResetOnSpawn = false
 gui.DisplayOrder = 999
 local okParent = pcall(function() gui.Parent = parentGui end)
-if not okPparent and not gui.Parent then gui.Parent = LP:WaitForChild("PlayerGui") end
+if not okParent or not gui.Parent then gui.Parent = LP:WaitForChild("PlayerGui") end
 
+local FULL_H = 284
 local frame = Instance.new("Frame")
-frame.Size = UDim2.fromOffset(230, 262)
-frame.Position = UDim2.new(0, 10, 0.25, 0)
+frame.Size = UDim2.fromOffset(236, FULL_H)
+frame.Position = UDim2.new(0, 10, 0.2, 0)
 frame.BackgroundColor3 = Color3.fromRGB(24, 26, 32)
 frame.BorderSizePixel = 0
 frame.Parent = gui
@@ -288,7 +310,7 @@ local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, -64, 0, 28)
 title.Position = UDim2.fromOffset(8, 0)
 title.BackgroundTransparency = 1
-title.Text = "AutoBuy v5"
+title.Text = "AutoBuy v6"
 title.TextColor3 = Color3.fromRGB(235, 235, 235)
 title.TextXAlignment = Enum.TextXAlignment.Left
 title.Font = Enum.Font.GothamBold
@@ -301,7 +323,7 @@ body.Position = UDim2.fromOffset(0, 28)
 body.BackgroundTransparency = 1
 body.Parent = frame
 
-local function mkButton(text, y, color, parent, callback)
+local function mkButton(text, y, color, callback)
     local b = Instance.new("TextButton")
     b.Size = UDim2.new(1, -16, 0, 30)
     b.Position = UDim2.fromOffset(8, y)
@@ -310,15 +332,14 @@ local function mkButton(text, y, color, parent, callback)
     b.TextColor3 = Color3.new(1, 1, 1)
     b.Font = Enum.Font.GothamSemibold
     b.TextSize = 13
-    b.AutoButtonColor = true
-    b.Parent = parent
+    b.Parent = body
     Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
     b.MouseButton1Click:Connect(callback)
     return b
 end
 
 local info = Instance.new("TextLabel")
-info.Size = UDim2.new(1, -16, 0, 74)
+info.Size = UDim2.new(1, -16, 0, 92)
 info.Position = UDim2.fromOffset(8, 4)
 info.BackgroundTransparency = 1
 info.TextColor3 = Color3.fromRGB(190, 195, 205)
@@ -330,15 +351,15 @@ info.TextSize = 12
 info.Parent = body
 
 local toggleBtn
-toggleBtn = mkButton("AutoBuy: ON", 82, Color3.fromRGB(46, 160, 90), body, function()
+toggleBtn = mkButton("AutoBuy: ON", 100, Color3.fromRGB(46, 160, 90), function()
     state.Enabled = not state.Enabled
     toggleBtn.Text = "AutoBuy: " .. (state.Enabled and "ON" or "OFF")
     toggleBtn.BackgroundColor3 = state.Enabled
         and Color3.fromRGB(46, 160, 90) or Color3.fromRGB(150, 60, 60)
 end)
-mkButton("TP ke Tombol Berikutnya", 118, Color3.fromRGB(52, 110, 190), body, tpNextButton)
-mkButton("TP ke Base", 154, Color3.fromRGB(80, 90, 110), body, tpBase)
-mkButton("Tutup dan Stop", 190, Color3.fromRGB(150, 60, 60), body, function()
+mkButton("TP ke Tombol Berikutnya", 136, Color3.fromRGB(52, 110, 190), tpNextButton)
+mkButton("TP ke Base", 172, Color3.fromRGB(80, 90, 110), tpBase)
+mkButton("Tutup dan Stop", 208, Color3.fromRGB(150, 60, 60), function()
     state.Stop = true
     getgenv().AutoBuyStop = true
     gui:Destroy()
@@ -358,7 +379,7 @@ local minimized = false
 miniBtn.MouseButton1Click:Connect(function()
     minimized = not minimized
     body.Visible = not minimized
-    frame.Size = minimized and UDim2.fromOffset(230, 28) or UDim2.fromOffset(230, 262)
+    frame.Size = minimized and UDim2.fromOffset(236, 28) or UDim2.fromOffset(236, FULL_H)
     miniBtn.Text = minimized and "+" or "-"
 end)
 
@@ -389,9 +410,10 @@ end
 task.spawn(function() -- refresh status
     while gui.Parent and not state.Stop do
         local cash = getCash()
-        info.Text = ("Base: %s\nUang: %s\nTombol tersisa: %d\nTerbeli: %d\nStatus: %s"):format(
-            tycoon.Name, cash and tostring(cash) or "tak terbaca",
-            #folder:GetChildren(), state.Bought, state.Status)
+        info.Text = ("Base: %s | Terbeli: %d\nUang: %s\nTombol: %d | berharga: %d | mampu: %d\nStatus: %s"):format(
+            tycoon.Name, state.Bought,
+            cash and tostring(cash) or "tak terbaca (pakai warna)",
+            state.Total, state.Priced, state.Afford, state.Status)
         task.wait(0.5)
     end
 end)
