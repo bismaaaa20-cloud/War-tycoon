@@ -1,9 +1,13 @@
--- AutoTycoon v9 (AutoBuy + AutoCollect + Extractor + UI + TP + nudge)
+-- AutoTycoon v10 (UI gaya hub: tab kiri, daftar fitur kanan)
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local UIS = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
 local LP = Players.LocalPlayer
 
+-- Setiap run punya ID; salinan lama berhenti sendiri saat skrip dijalankan ulang
+local RUN_ID = (getgenv().AutoTycoonRun or 0) + 1
+getgenv().AutoTycoonRun = RUN_ID
 getgenv().AutoTycoonStop = false
 
 ---------------------------------------------------------------- deteksi base
@@ -37,6 +41,10 @@ if not ess then warn("[AutoTycoon] Essentials tidak ditemukan, AutoCollect nonak
 local canCollectVal = ess and ess:FindFirstChild("CanCollect")
 local lastCollectVal = ess and ess:FindFirstChild("LastCollect")
 
+-- posisi ATM disimpan per nama base
+local atmStore = getgenv().AtmPosByBase or {}
+getgenv().AtmPosByBase = atmStore
+
 ---------------------------------------------------------------- konfigurasi
 local CONFIG = {
     BuyInterval           = 0.7,
@@ -46,11 +54,14 @@ local CONFIG = {
     VerifyDelay           = 0.5,
     BlacklistTime         = 5,
     UnknownPriceBlacklist = 30,
-    UseColorGate          = true,  -- uang tak terbaca: beli hanya tombol hijau
-    TpLift                = -2.2,  -- tinggi TP; bisa disetel live lewat tombol - dan +
-    NudgeDist             = 1.2,   -- jarak geser setelah TP (dikecilkan otomatis untuk tombol kecil)
-    NudgeWait             = 0.06,  -- jeda tiap geseran
-    NudgeJump             = true,  -- lompat kecil di akhir
+    UseColorGate          = true,
+    TpLift                = getgenv().AutoTycoonLift or -2.2,
+    PreferTeleport        = true,
+    PreWalkWait           = 0.15,
+    WalkDist              = 1.2,
+    WalkPasses            = 1,
+    WalkTimeout           = 0.5,
+    NudgeJump             = true,
     StreamTimeout         = 3,
     UseCanCollect         = true,
     SkipNames             = { "gamepass", "robux" },
@@ -64,6 +75,11 @@ local state = {
     Bought = 0, Status = "Siap", CollectStatus = "-", ExtCount = 0,
     TpIndex = 0, Total = 0, Priced = 0, Afford = 0,
 }
+
+local function alive()
+    return not state.Stop and not getgenv().AutoTycoonStop
+        and getgenv().AutoTycoonRun == RUN_ID
+end
 
 ---------------------------------------------------------------- util umum
 local function getHRP()
@@ -97,27 +113,46 @@ local function standCFrame(part, hrp)
     return CFrame.new(pos) * rot
 end
 
--- Gerak kecil setelah TP supaya sentuhan terdeteksi
+-- Jalan kecil sungguhan setelah TP supaya server menghitung sentuhan
 local function nudge(hrp, baseCF, part)
-    local d = CONFIG.NudgeDist
+    local hum = hrp.Parent and hrp.Parent:FindFirstChildOfClass("Humanoid")
+    local d = CONFIG.WalkDist
     if part then
         d = math.min(d, math.max(part.Size.X, part.Size.Z) / 3)
     end
-    local offsets = {
-        Vector3.new(d, 0, 0), Vector3.new(-d, 0, 0),
-        Vector3.new(0, 0, d), Vector3.new(0, 0, -d),
-    }
-    for _, off in ipairs(offsets) do
-        hrp.CFrame = baseCF + off
-        task.wait(CONFIG.NudgeWait)
-    end
-    hrp.CFrame = baseCF
-    if CONFIG.NudgeJump then
-        local hum = hrp.Parent and hrp.Parent:FindFirstChildOfClass("Humanoid")
-        if hum then
-            hum:ChangeState(Enum.HumanoidStateType.Jumping)
-            task.wait(0.4) -- tunggu mendarat kembali di atas tombol
+    local c = baseCF.Position
+
+    if hum then
+        task.wait(CONFIG.PreWalkWait)
+        local y = hrp.Position.Y
+        local points = {
+            Vector3.new(c.X + d, y, c.Z), Vector3.new(c.X - d, y, c.Z),
+            Vector3.new(c.X, y, c.Z + d), Vector3.new(c.X, y, c.Z - d),
+            Vector3.new(c.X, y, c.Z),
+        }
+        for _ = 1, CONFIG.WalkPasses do
+            for _, p in ipairs(points) do
+                hum:MoveTo(p)
+                local t0 = os.clock()
+                while (Vector3.new(hrp.Position.X, 0, hrp.Position.Z)
+                        - Vector3.new(p.X, 0, p.Z)).Magnitude > 0.4
+                    and os.clock() - t0 < CONFIG.WalkTimeout do
+                    task.wait()
+                end
+            end
         end
+        hum:MoveTo(hrp.Position) -- berhenti
+    else
+        for _, off in ipairs({ Vector3.new(d, 0, 0), Vector3.new(-d, 0, 0) }) do
+            hrp.CFrame = baseCF + off
+            task.wait(0.1)
+        end
+        hrp.CFrame = baseCF
+    end
+
+    if CONFIG.NudgeJump and hum then
+        hum:ChangeState(Enum.HumanoidStateType.Jumping)
+        task.wait(0.4)
     end
 end
 
@@ -298,6 +333,10 @@ end
 ---------------------------------------------------------------- AutoBuy
 local attempts = {}
 
+local function startMethod()
+    return CONFIG.PreferTeleport and 2 or 1
+end
+
 local function doTouch(hrp, part, method)
     if method == 1 and typeof(firetouchinterest) == "function" then
         firetouchinterest(hrp, part, 0)
@@ -314,7 +353,7 @@ local function doTouch(hrp, part, method)
 end
 
 local function buy(hrp, item)
-    local st = attempts[item.inst] or { method = 1, blockedUntil = 0 }
+    local st = attempts[item.inst] or { method = startMethod(), blockedUntil = 0 }
     attempts[item.inst] = st
     local cashBefore = getCash()
     state.Status = "Membeli: " .. item.inst.Name
@@ -332,7 +371,7 @@ local function buy(hrp, item)
     if st.method == 1 then
         st.method = 2
     else
-        st.method = 1
+        st.method = startMethod()
         st.blockedUntil = os.clock()
             + (item.unknownPrice and CONFIG.UnknownPriceBlacklist or CONFIG.BlacklistTime)
         state.Status = "Belum bisa: " .. item.inst.Name
@@ -372,7 +411,7 @@ local function buyStep()
         return
     end
     for _, item in ipairs(candidates) do
-        if not state.BuyOn or state.Stop or getgenv().AutoTycoonStop then return end
+        if not state.BuyOn or not alive() then return end
         if item.inst.Parent == folder then
             local c = getCash()
             if c == nil or c >= item.price then
@@ -385,7 +424,7 @@ end
 
 ---------------------------------------------------------------- AutoCollect
 local function atmPos()
-    if getgenv().AtmPos then return getgenv().AtmPos end
+    if atmStore[tycoon.Name] then return atmStore[tycoon.Name] end
     if ess then
         local sp = ess:FindFirstChild("BaseSpawn")
         if sp and sp:IsA("BasePart") then return sp.Position end
@@ -400,7 +439,7 @@ local function findCollector(timeout)
     if not model then return nil end
     local part = model:FindFirstChild("Collector") or model:WaitForChild("Collector", timeout)
     if part and part:IsA("BasePart") then
-        getgenv().AtmPos = part.Position -- simpan posisi akurat
+        atmStore[tycoon.Name] = part.Position -- simpan posisi akurat
         return part
     end
     return nil
@@ -415,7 +454,6 @@ local function fireTouch(hrp, part)
 end
 
 local COLLECT = {
-    -- 1: minta game memuat area ATM, lalu sentuh dari jauh
     [1] = function(hrp)
         local pos = atmPos()
         if pos then
@@ -428,7 +466,6 @@ local COLLECT = {
         end
         fireTouch(hrp, part)
     end,
-    -- 2: teleport ke ATM, sentuh, gerak kecil, kembali
     [2] = function(hrp)
         local pos = atmPos()
         if not pos then return end
@@ -448,8 +485,8 @@ local COLLECT = {
         hrp.CFrame = old
     end,
 }
-local COLLECT_NAMES = { "stream + sentuh", "teleport ke ATM" }
-local collectMethod, collectLocked, collectFails = 1, false, 0
+local COLLECT_NAMES = { "stream + sentuh", "teleport + jalan" }
+local collectMethod, collectLocked, collectFails = startMethod(), false, 0
 
 local function collectStep()
     if not ess then return end
@@ -535,7 +572,7 @@ end
 local function saveAtm()
     local hrp = getHRP()
     if hrp then
-        getgenv().AtmPos = hrp.Position
+        atmStore[tycoon.Name] = hrp.Position
         state.Status = "Posisi ATM disimpan"
     end
 end
@@ -554,7 +591,7 @@ task.spawn(function()
         warn("[AutoTycoon] Executor tidak mendukung firesignal.")
         ev = nil
     end
-    while ev and not state.Stop and not getgenv().AutoTycoonStop do
+    while ev and alive() do
         if state.ExtractorOn then
             local ok2, err = pcall(function() firesignal(ev.OnClientEvent) end)
             if ok2 then state.ExtCount += 1 else warn("[AutoTycoon] extractor:", err) end
@@ -563,7 +600,7 @@ task.spawn(function()
     end
 end)
 
----------------------------------------------------------------- UI
+---------------------------------------------------------------- UI (gaya hub)
 local parentGui
 do
     local ok, p = pcall(function()
@@ -583,178 +620,457 @@ gui.DisplayOrder = 999
 local okParent = pcall(function() gui.Parent = parentGui end)
 if not okParent or not gui.Parent then gui.Parent = LP:WaitForChild("PlayerGui") end
 
-local W, FULL_H = 300, 322
-local GREEN, RED = Color3.fromRGB(46, 160, 90), Color3.fromRGB(150, 60, 60)
-local BLUE, GRAY = Color3.fromRGB(52, 110, 190), Color3.fromRGB(80, 90, 110)
+local THEME = {
+    bg     = Color3.fromRGB(17, 18, 23),
+    side   = Color3.fromRGB(22, 24, 30),
+    row    = Color3.fromRGB(30, 32, 40),
+    rowHi  = Color3.fromRGB(42, 45, 57),
+    accent = Color3.fromRGB(96, 108, 255),
+    text   = Color3.fromRGB(235, 236, 240),
+    sub    = Color3.fromRGB(150, 155, 168),
+    off    = Color3.fromRGB(58, 61, 74),
+    red    = Color3.fromRGB(190, 70, 70),
+}
+local FONT, FONT_B, FONT_X = Enum.Font.Gotham, Enum.Font.GothamSemibold, Enum.Font.GothamBold
 
-local frame = Instance.new("Frame")
-frame.Size = UDim2.fromOffset(W, FULL_H)
-frame.Position = UDim2.new(0, 10, 0.1, 0)
-frame.BackgroundColor3 = Color3.fromRGB(24, 26, 32)
-frame.BorderSizePixel = 0
-frame.Parent = gui
-Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
+local conns = {}
+local function track(c) table.insert(conns, c) return c end
 
-local title = Instance.new("TextLabel")
-title.Size = UDim2.new(1, -64, 0, 28)
-title.Position = UDim2.fromOffset(8, 0)
-title.BackgroundTransparency = 1
-title.Text = "AutoTycoon v9"
-title.TextColor3 = Color3.fromRGB(235, 235, 235)
-title.TextXAlignment = Enum.TextXAlignment.Left
-title.Font = Enum.Font.GothamBold
-title.TextSize = 14
-title.Parent = frame
-
-local body = Instance.new("Frame")
-body.Size = UDim2.new(1, 0, 1, -28)
-body.Position = UDim2.fromOffset(0, 28)
-body.BackgroundTransparency = 1
-body.Parent = frame
-
-local function mkBtn(text, col, row, color, callback)
-    local b = Instance.new("TextButton")
-    b.Size = UDim2.fromOffset(138, 30)
-    b.Position = UDim2.fromOffset(8 + col * 146, 112 + row * 34)
-    b.BackgroundColor3 = color
-    b.Text = text
-    b.TextColor3 = Color3.new(1, 1, 1)
-    b.Font = Enum.Font.GothamSemibold
-    b.TextSize = 12
-    b.Parent = body
-    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
-    b.MouseButton1Click:Connect(callback)
-    return b
+local function corner(o, r)
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, r or 6)
+    c.Parent = o
+    return c
 end
 
-local function mkToggle(label, key, col, row)
-    local b
-    local function paint()
-        b.Text = label .. ": " .. (state[key] and "ON" or "OFF")
-        b.BackgroundColor3 = state[key] and GREEN or RED
-    end
-    b = mkBtn(label, col, row, GREEN, function()
-        state[key] = not state[key]
-        paint()
-    end)
-    paint()
+local function mkLabel(parent, text, size, color, font, xalign)
+    local l = Instance.new("TextLabel")
+    l.BackgroundTransparency = 1
+    l.Text = text
+    l.TextSize = size
+    l.TextColor3 = color
+    l.Font = font or FONT
+    l.TextXAlignment = xalign or Enum.TextXAlignment.Left
+    l.TextTruncate = Enum.TextTruncate.AtEnd
+    l.Parent = parent
+    return l
 end
 
-local info = Instance.new("TextLabel")
-info.Size = UDim2.new(1, -16, 0, 104)
-info.Position = UDim2.fromOffset(8, 4)
-info.BackgroundTransparency = 1
-info.TextColor3 = Color3.fromRGB(190, 195, 205)
-info.TextXAlignment = Enum.TextXAlignment.Left
-info.TextYAlignment = Enum.TextYAlignment.Top
-info.TextWrapped = true
-info.Font = Enum.Font.Gotham
-info.TextSize = 12
-info.Parent = body
-
-mkToggle("AutoBuy", "BuyOn", 0, 0)
-mkToggle("Collect", "CollectOn", 1, 0)
-mkToggle("Extractor", "ExtractorOn", 0, 1)
-mkBtn("TP ke Tombol", 1, 1, BLUE, tpNextButton)
-mkBtn("TP ke Base", 0, 2, GRAY, tpBase)
-mkBtn("TP ke ATM", 1, 2, GRAY, tpAtm)
-mkBtn("Simpan Posisi ATM", 0, 3, BLUE, saveAtm)
-mkBtn("Tutup dan Stop", 1, 3, RED, function()
-    state.Stop = true
-    getgenv().AutoTycoonStop = true
-    gui:Destroy()
-end)
-
--- Tweak tinggi TP (live)
-local function mkSmall(text, pos, callback)
-    local b = Instance.new("TextButton")
-    b.Size = UDim2.fromOffset(40, 30)
-    b.Position = pos
-    b.BackgroundColor3 = Color3.fromRGB(70, 76, 92)
-    b.Text = text
-    b.TextColor3 = Color3.new(1, 1, 1)
-    b.Font = Enum.Font.GothamBold
-    b.TextSize = 18
-    b.Parent = body
-    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
-    b.MouseButton1Click:Connect(callback)
-    return b
-end
-
-local liftLabel = Instance.new("TextLabel")
-liftLabel.Size = UDim2.new(1, -104, 0, 30)
-liftLabel.Position = UDim2.fromOffset(52, 248)
-liftLabel.BackgroundTransparency = 1
-liftLabel.TextColor3 = Color3.fromRGB(220, 224, 232)
-liftLabel.Font = Enum.Font.GothamSemibold
-liftLabel.TextSize = 12
-liftLabel.Parent = body
-
-local function setLift(v)
-    CONFIG.TpLift = math.floor(v * 10 + 0.5) / 10
-    liftLabel.Text = "Tinggi TP: " .. CONFIG.TpLift
-end
-setLift(CONFIG.TpLift)
-mkSmall("-", UDim2.fromOffset(8, 248), function() setLift(CONFIG.TpLift - 0.2) end)
-mkSmall("+", UDim2.new(1, -48, 0, 248), function() setLift(CONFIG.TpLift + 0.2) end)
-
-local miniBtn = Instance.new("TextButton")
-miniBtn.Size = UDim2.fromOffset(26, 22)
-miniBtn.Position = UDim2.new(1, -34, 0, 3)
-miniBtn.BackgroundColor3 = Color3.fromRGB(50, 54, 64)
-miniBtn.Text = "-"
-miniBtn.TextColor3 = Color3.new(1, 1, 1)
-miniBtn.Font = Enum.Font.GothamBold
-miniBtn.TextSize = 16
-miniBtn.Parent = frame
-Instance.new("UICorner", miniBtn).CornerRadius = UDim.new(0, 5)
-local minimized = false
-miniBtn.MouseButton1Click:Connect(function()
-    minimized = not minimized
-    body.Visible = not minimized
-    frame.Size = minimized and UDim2.fromOffset(W, 28) or UDim2.fromOffset(W, FULL_H)
-    miniBtn.Text = minimized and "+" or "-"
-end)
-
--- geser jendela lewat judul (mouse dan sentuhan)
-do
-    local dragging, dragStart, startPos
-    title.Active = true
-    title.InputBegan:Connect(function(input)
+local function makeDraggable(handle, target)
+    local dragging, dragStart, startPos, moved = false, nil, nil, false
+    track(handle.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1
             or input.UserInputType == Enum.UserInputType.Touch then
-            dragging, dragStart, startPos = true, input.Position, frame.Position
+            dragging, moved = true, false
+            dragStart, startPos = input.Position, target.Position
             input.Changed:Connect(function()
                 if input.UserInputState == Enum.UserInputState.End then dragging = false end
             end)
         end
-    end)
-    UIS.InputChanged:Connect(function(input)
+    end))
+    track(UIS.InputChanged:Connect(function(input)
         if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
             or input.UserInputType == Enum.UserInputType.Touch) then
             local d = input.Position - dragStart
-            frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X,
+            if d.Magnitude > 6 then moved = true end
+            target.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X,
                 startPos.Y.Scale, startPos.Y.Offset + d.Y)
         end
+    end))
+    return function() return moved end
+end
+
+local function shutdown()
+    state.Stop = true
+    getgenv().AutoTycoonStop = true
+    for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+    gui:Destroy()
+end
+
+-- jendela
+local win = Instance.new("Frame")
+win.Name = "Window"
+win.Size = UDim2.fromOffset(540, 320)
+win.Position = UDim2.new(0.5, -270, 0.5, -160)
+win.BackgroundColor3 = THEME.bg
+win.BorderSizePixel = 0
+win.Parent = gui
+corner(win, 10)
+
+local titleBar = Instance.new("Frame")
+titleBar.Size = UDim2.new(1, 0, 0, 36)
+titleBar.BackgroundColor3 = THEME.side
+titleBar.BorderSizePixel = 0
+titleBar.Parent = win
+corner(titleBar, 10)
+
+local titleText = mkLabel(titleBar, "AutoTycoon v10 : " .. tycoon.Name, 14, THEME.text, FONT_X)
+titleText.Position = UDim2.fromOffset(14, 0)
+titleText.Size = UDim2.new(1, -110, 1, 0)
+
+local function mkTitleBtn(text, xOff, color, cb)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.fromOffset(30, 26)
+    b.Position = UDim2.new(1, xOff, 0, 5)
+    b.BackgroundColor3 = color
+    b.Text = text
+    b.TextColor3 = THEME.text
+    b.Font = FONT_X
+    b.TextSize = 14
+    b.Parent = titleBar
+    corner(b, 6)
+    b.MouseButton1Click:Connect(cb)
+    return b
+end
+mkTitleBtn("-", -72, THEME.off, function() win.Visible = false end)
+mkTitleBtn("X", -38, THEME.red, shutdown)
+
+-- ikon melayang untuk buka dan tutup jendela
+local icon = Instance.new("TextButton")
+icon.Size = UDim2.fromOffset(44, 44)
+icon.Position = UDim2.new(0, 80, 0, 10)
+icon.BackgroundColor3 = THEME.accent
+icon.Text = "AT"
+icon.TextColor3 = Color3.new(1, 1, 1)
+icon.Font = FONT_X
+icon.TextSize = 16
+icon.Parent = gui
+corner(icon, 22)
+local iconMoved = makeDraggable(icon, icon)
+icon.MouseButton1Click:Connect(function()
+    if not iconMoved() then win.Visible = not win.Visible end
+end)
+makeDraggable(titleBar, win)
+
+-- sidebar tab
+local side = Instance.new("Frame")
+side.Size = UDim2.new(0, 150, 1, -36)
+side.Position = UDim2.fromOffset(0, 36)
+side.BackgroundColor3 = THEME.side
+side.BorderSizePixel = 0
+side.Parent = win
+
+local sideList = Instance.new("UIListLayout")
+sideList.Padding = UDim.new(0, 4)
+sideList.HorizontalAlignment = Enum.HorizontalAlignment.Center
+sideList.SortOrder = Enum.SortOrder.LayoutOrder
+sideList.Parent = side
+local sidePad = Instance.new("UIPadding")
+sidePad.PaddingTop = UDim.new(0, 8)
+sidePad.Parent = side
+
+local content = Instance.new("Frame")
+content.Size = UDim2.new(1, -150, 1, -36)
+content.Position = UDim2.fromOffset(150, 36)
+content.BackgroundTransparency = 1
+content.Parent = win
+
+local tabs, tabBtns, order, updaters = {}, {}, setmetatable({}, { __mode = "k" }), {}
+local currentTab
+
+local function nextOrder(tab)
+    order[tab] = (order[tab] or 0) + 1
+    return order[tab]
+end
+
+local function selectTab(name)
+    currentTab = name
+    for n, sf in pairs(tabs) do sf.Visible = (n == name) end
+    for n, b in pairs(tabBtns) do
+        b.btn.BackgroundColor3 = (n == name) and THEME.rowHi or THEME.side
+        b.bar.Visible = (n == name)
+        b.btn.TextColor3 = (n == name) and THEME.text or THEME.sub
+    end
+end
+
+local tabCount = 0
+local function newTab(name)
+    tabCount += 1
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, -16, 0, 34)
+    btn.LayoutOrder = tabCount
+    btn.BackgroundColor3 = THEME.side
+    btn.Text = "   " .. name
+    btn.TextXAlignment = Enum.TextXAlignment.Left
+    btn.TextColor3 = THEME.sub
+    btn.Font = FONT_B
+    btn.TextSize = 13
+    btn.AutoButtonColor = false
+    btn.Parent = side
+    corner(btn, 6)
+    local bar = Instance.new("Frame")
+    bar.Size = UDim2.fromOffset(3, 18)
+    bar.Position = UDim2.new(0, 2, 0.5, -9)
+    bar.BackgroundColor3 = THEME.accent
+    bar.BorderSizePixel = 0
+    bar.Visible = false
+    bar.Parent = btn
+    corner(bar, 2)
+    tabBtns[name] = { btn = btn, bar = bar }
+
+    local sf = Instance.new("ScrollingFrame")
+    sf.Size = UDim2.new(1, -10, 1, -10)
+    sf.Position = UDim2.fromOffset(6, 6)
+    sf.BackgroundTransparency = 1
+    sf.BorderSizePixel = 0
+    sf.ScrollBarThickness = 4
+    sf.ScrollBarImageColor3 = THEME.accent
+    sf.CanvasSize = UDim2.new(0, 0, 0, 0)
+    sf.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    sf.ScrollingDirection = Enum.ScrollingDirection.Y
+    sf.Visible = false
+    sf.Parent = content
+    local list = Instance.new("UIListLayout")
+    list.Padding = UDim.new(0, 6)
+    list.SortOrder = Enum.SortOrder.LayoutOrder
+    list.Parent = sf
+    tabs[name] = sf
+    btn.MouseButton1Click:Connect(function() selectTab(name) end)
+    return sf
+end
+
+local function addSection(tab, text)
+    local l = mkLabel(tab, text, 15, THEME.text, FONT_X)
+    l.Size = UDim2.new(1, -8, 0, 24)
+    l.LayoutOrder = nextOrder(tab)
+    return l
+end
+
+local function newRow(tab, h)
+    local r = Instance.new("Frame")
+    r.Size = UDim2.new(1, -8, 0, h or 46)
+    r.BackgroundColor3 = THEME.row
+    r.BorderSizePixel = 0
+    r.LayoutOrder = nextOrder(tab)
+    r.Parent = tab
+    corner(r, 6)
+    return r
+end
+
+local function rowTexts(r, title, sub, rightPad)
+    local t = mkLabel(r, title, 13, THEME.text, FONT_B)
+    t.Position = UDim2.fromOffset(12, sub and 6 or 0)
+    t.Size = UDim2.new(1, -(rightPad + 12), 0, sub and 18 or r.Size.Y.Offset)
+    if sub then
+        local s = mkLabel(r, sub, 11, THEME.sub, FONT)
+        s.Position = UDim2.fromOffset(12, 25)
+        s.Size = UDim2.new(1, -(rightPad + 12), 0, 14)
+    end
+end
+
+local function addToggle(tab, title, sub, get, set)
+    local r = newRow(tab, 46)
+    rowTexts(r, title, sub, 64)
+    local trackF = Instance.new("Frame")
+    trackF.Size = UDim2.fromOffset(46, 24)
+    trackF.Position = UDim2.new(1, -58, 0.5, -12)
+    trackF.BorderSizePixel = 0
+    trackF.Parent = r
+    corner(trackF, 12)
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.fromOffset(18, 18)
+    knob.BackgroundColor3 = Color3.new(1, 1, 1)
+    knob.BorderSizePixel = 0
+    knob.Parent = trackF
+    corner(knob, 9)
+    local function paint(animate)
+        local on = get()
+        local pos = on and UDim2.fromOffset(25, 3) or UDim2.fromOffset(3, 3)
+        if animate then
+            TweenService:Create(knob, TweenInfo.new(0.12), { Position = pos }):Play()
+        else
+            knob.Position = pos
+        end
+        trackF.BackgroundColor3 = on and THEME.accent or THEME.off
+    end
+    local btn = Instance.new("TextButton")
+    btn.BackgroundTransparency = 1
+    btn.Text = ""
+    btn.Size = UDim2.fromScale(1, 1)
+    btn.Parent = r
+    btn.MouseButton1Click:Connect(function() set(not get()); paint(true) end)
+    paint(false)
+    table.insert(updaters, function() paint(false) end)
+end
+
+local function addButton(tab, title, sub, cb)
+    local r = newRow(tab, 46)
+    rowTexts(r, title, sub, 40)
+    local arrow = mkLabel(r, ">", 18, THEME.sub, FONT_X, Enum.TextXAlignment.Center)
+    arrow.Position = UDim2.new(1, -34, 0, 0)
+    arrow.Size = UDim2.fromOffset(24, 46)
+    local btn = Instance.new("TextButton")
+    btn.BackgroundTransparency = 1
+    btn.Text = ""
+    btn.Size = UDim2.fromScale(1, 1)
+    btn.Parent = r
+    btn.MouseButton1Click:Connect(function()
+        r.BackgroundColor3 = THEME.rowHi
+        task.spawn(cb)
+        task.delay(0.15, function() r.BackgroundColor3 = THEME.row end)
     end)
 end
 
----------------------------------------------------------------- loop utama
-task.spawn(function() -- refresh status
-    while gui.Parent and not state.Stop do
-        local cash = getCash()
-        info.Text = ("Base: %s | RB: %s | Terbeli: %d\nUang: %s\nTombol: %d | berharga: %d | mampu: %d\nCollect: %s\nExtractor: %d kali\nStatus: %s"):format(
-            tycoon.Name, tostring(getRebirths() or "?"), state.Bought,
-            cash and tostring(cash) or "tak terbaca (pakai warna)",
-            state.Total, state.Priced, state.Afford,
-            state.CollectStatus, state.ExtCount, state.Status)
+local function addStepper(tab, title, sub, get, set, step, minv, maxv, fmt)
+    local r = newRow(tab, 46)
+    rowTexts(r, title, sub, 150)
+    local val = mkLabel(r, "", 13, THEME.text, FONT_X, Enum.TextXAlignment.Center)
+    val.Position = UDim2.new(1, -112, 0, 0)
+    val.Size = UDim2.fromOffset(52, 46)
+    local function paint() val.Text = (fmt or "%g"):format(get()) end
+    local function bump(delta)
+        local v = math.clamp(math.floor((get() + delta) * 100 + 0.5) / 100, minv, maxv)
+        set(v)
+        paint()
+    end
+    local function mk(text, x, delta)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.fromOffset(32, 30)
+        b.Position = UDim2.new(1, x, 0.5, -15)
+        b.BackgroundColor3 = THEME.off
+        b.Text = text
+        b.TextColor3 = THEME.text
+        b.Font = FONT_X
+        b.TextSize = 18
+        b.Parent = r
+        corner(b, 6)
+        b.MouseButton1Click:Connect(function() bump(delta) end)
+    end
+    mk("-", -144, -step)
+    mk("+", -44, step)
+    paint()
+    table.insert(updaters, paint)
+end
+
+local function addInfo(tab, title, getfn)
+    local r = newRow(tab, 38)
+    local t = mkLabel(r, title, 13, THEME.sub, FONT_B)
+    t.Position = UDim2.fromOffset(12, 0)
+    t.Size = UDim2.new(0.36, 0, 1, 0)
+    local v = mkLabel(r, "", 12, THEME.text, FONT, Enum.TextXAlignment.Right)
+    v.TextWrapped = true
+    v.Position = UDim2.new(0.36, 0, 0, 0)
+    v.Size = UDim2.new(0.64, -12, 1, 0)
+    local function paint()
+        local ok, txt = pcall(getfn)
+        v.Text = ok and tostring(txt) or "-"
+    end
+    paint()
+    table.insert(updaters, paint)
+end
+
+local function rebirthText()
+    local ov = tonumber(getgenv().AutoBuyRebirth)
+    local rb = getRebirths()
+    return (rb and tostring(rb) or "?") .. (ov and " (override)" or "")
+end
+
+-- toggle bantu
+local function tBuy()  addToggle(tabs.Utama, "AutoBuy", "Beli tombol otomatis (termurah dulu)",
+    function() return state.BuyOn end, function(v) state.BuyOn = v end) end
+
+---- TAB: Utama
+local tUtama = newTab("Utama")
+addSection(tUtama, "Status")
+addInfo(tUtama, "Base", function() return tycoon.Name end)
+addInfo(tUtama, "Rebirth", rebirthText)
+addInfo(tUtama, "Uang", function() return getCash() or "tak terbaca (pakai warna)" end)
+addInfo(tUtama, "Status", function() return state.Status end)
+addSection(tUtama, "Fitur")
+tBuy()
+addToggle(tUtama, "Collect", "Ambil uang dari ATM otomatis",
+    function() return state.CollectOn end, function(v) state.CollectOn = v end)
+addToggle(tUtama, "Extractor", "Picu extractor tiap beberapa detik",
+    function() return state.ExtractorOn end, function(v) state.ExtractorOn = v end)
+
+---- TAB: Beli
+local tBeli = newTab("Beli")
+addSection(tBeli, "AutoBuy")
+addToggle(tBeli, "AutoBuy", "Beli tombol otomatis",
+    function() return state.BuyOn end, function(v) state.BuyOn = v end)
+addInfo(tBeli, "Tombol", function()
+    return ("%d total | %d berharga | %d mampu"):format(state.Total, state.Priced, state.Afford)
+end)
+addInfo(tBeli, "Terbeli", function() return state.Bought end)
+addSection(tBeli, "Pengaturan beli")
+addToggle(tBeli, "Gerbang warna hijau", "Uang tak terbaca: beli hanya tombol hijau",
+    function() return CONFIG.UseColorGate end, function(v) CONFIG.UseColorGate = v end)
+addToggle(tBeli, "Mulai dari teleport + jalan", "Lewati sentuhan jarak jauh",
+    function() return CONFIG.PreferTeleport end, function(v) CONFIG.PreferTeleport = v end)
+addStepper(tBeli, "Interval beli", "Detik antar putaran",
+    function() return CONFIG.BuyInterval end, function(v) CONFIG.BuyInterval = v end,
+    0.1, 0.3, 3, "%.1f")
+addStepper(tBeli, "Tahan tombol gagal", "Detik sebelum dicoba lagi",
+    function() return CONFIG.BlacklistTime end, function(v) CONFIG.BlacklistTime = v end,
+    1, 2, 30, "%d")
+addSection(tBeli, "Rebirth")
+addInfo(tBeli, "Rebirth", rebirthText)
+addStepper(tBeli, "Override rebirth", "Isi manual bila tampil ?",
+    function() return tonumber(getgenv().AutoBuyRebirth) or getRebirths() or 0 end,
+    function(v) getgenv().AutoBuyRebirth = v end, 1, 0, 100, "%d")
+addButton(tBeli, "Pakai rebirth asli", "Hapus override manual",
+    function() getgenv().AutoBuyRebirth = nil end)
+
+---- TAB: Collect
+local tCollect = newTab("Collect")
+addSection(tCollect, "AutoCollect")
+addToggle(tCollect, "Collect", "Ambil uang dari ATM otomatis",
+    function() return state.CollectOn end, function(v) state.CollectOn = v end)
+addInfo(tCollect, "Hasil", function() return state.CollectStatus end)
+addToggle(tCollect, "Tunggu CanCollect", "Hanya ambil saat ATM siap",
+    function() return CONFIG.UseCanCollect end, function(v) CONFIG.UseCanCollect = v end)
+addStepper(tCollect, "Interval collect", "Detik antar pengambilan",
+    function() return CONFIG.CollectInterval end, function(v) CONFIG.CollectInterval = v end,
+    1, 1, 20, "%d")
+addSection(tCollect, "ATM")
+addButton(tCollect, "Simpan posisi ATM", "Berdiri di samping ATM dulu", saveAtm)
+addButton(tCollect, "TP ke ATM", nil, tpAtm)
+
+---- TAB: Teleport
+local tTp = newTab("Teleport")
+addSection(tTp, "Teleport")
+addButton(tTp, "TP ke tombol berikutnya", "Urut dari yang termurah", tpNextButton)
+addButton(tTp, "TP ke base", nil, tpBase)
+addButton(tTp, "TP ke ATM", nil, tpAtm)
+addSection(tTp, "Setelan teleport")
+addStepper(tTp, "Tinggi TP", "Negatif = kaki masuk ke tombol",
+    function() return CONFIG.TpLift end,
+    function(v) CONFIG.TpLift = v; getgenv().AutoTycoonLift = v end,
+    0.2, -6, 4, "%.1f")
+addStepper(tTp, "Jarak jalan", "Gerak kecil setelah TP",
+    function() return CONFIG.WalkDist end, function(v) CONFIG.WalkDist = v end,
+    0.2, 0.4, 3, "%.1f")
+addStepper(tTp, "Ulang pola jalan", "Naikkan bila sentuhan meleset",
+    function() return CONFIG.WalkPasses end, function(v) CONFIG.WalkPasses = v end,
+    1, 1, 3, "%d")
+addToggle(tTp, "Lompat kecil", "Mendarat lagi di atas tombol",
+    function() return CONFIG.NudgeJump end, function(v) CONFIG.NudgeJump = v end)
+
+---- TAB: Pengaturan
+local tSet = newTab("Pengaturan")
+addSection(tSet, "Extractor")
+addToggle(tSet, "Extractor", "Picu extractor tiap beberapa detik",
+    function() return state.ExtractorOn end, function(v) state.ExtractorOn = v end)
+addInfo(tSet, "Dikirim", function() return state.ExtCount .. " kali" end)
+addStepper(tSet, "Interval extractor", "Detik",
+    function() return CONFIG.ExtractorInterval end, function(v) CONFIG.ExtractorInterval = v end,
+    1, 1, 15, "%d")
+addSection(tSet, "Skrip")
+addButton(tSet, "Tutup dan Stop", "Hentikan semua dan tutup UI", shutdown)
+
+selectTab("Utama")
+
+---------------------------------------------------------------- loop
+task.spawn(function() -- refresh UI
+    while alive() and gui.Parent do
+        for _, fn in ipairs(updaters) do pcall(fn) end
         task.wait(0.5)
     end
 end)
 
 task.spawn(function() -- penjadwal tunggal: collect lalu beli, tanpa tabrakan teleport
     local lastCollect = 0
-    while not state.Stop and not getgenv().AutoTycoonStop do
+    while alive() do
         local now = os.clock()
         if state.CollectOn and ess and now - lastCollect >= CONFIG.CollectInterval then
             lastCollect = now
