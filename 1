@@ -1,4 +1,4 @@
--- AutoTycoon v8 (AutoBuy + AutoCollect + Extractor + UI + TP)
+-- AutoTycoon v9 (AutoBuy + AutoCollect + Extractor + UI + TP + nudge)
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local UIS = game:GetService("UserInputService")
@@ -47,7 +47,10 @@ local CONFIG = {
     BlacklistTime         = 5,
     UnknownPriceBlacklist = 30,
     UseColorGate          = true,  -- uang tak terbaca: beli hanya tombol hijau
-    TpLift                = getgenv().AutoBuyLift or 0,
+    TpLift                = -2.2,  -- tinggi TP; bisa disetel live lewat tombol - dan +
+    NudgeDist             = 1.2,   -- jarak geser setelah TP (dikecilkan otomatis untuk tombol kecil)
+    NudgeWait             = 0.06,  -- jeda tiap geseran
+    NudgeJump             = true,  -- lompat kecil di akhir
     StreamTimeout         = 3,
     UseCanCollect         = true,
     SkipNames             = { "gamepass", "robux" },
@@ -92,6 +95,30 @@ local function standCFrame(part, hrp)
     local pos = Vector3.new(part.Position.X,
         topY + hip + hrp.Size.Y / 2 + CONFIG.TpLift, part.Position.Z)
     return CFrame.new(pos) * rot
+end
+
+-- Gerak kecil setelah TP supaya sentuhan terdeteksi
+local function nudge(hrp, baseCF, part)
+    local d = CONFIG.NudgeDist
+    if part then
+        d = math.min(d, math.max(part.Size.X, part.Size.Z) / 3)
+    end
+    local offsets = {
+        Vector3.new(d, 0, 0), Vector3.new(-d, 0, 0),
+        Vector3.new(0, 0, d), Vector3.new(0, 0, -d),
+    }
+    for _, off in ipairs(offsets) do
+        hrp.CFrame = baseCF + off
+        task.wait(CONFIG.NudgeWait)
+    end
+    hrp.CFrame = baseCF
+    if CONFIG.NudgeJump then
+        local hum = hrp.Parent and hrp.Parent:FindFirstChildOfClass("Humanoid")
+        if hum then
+            hum:ChangeState(Enum.HumanoidStateType.Jumping)
+            task.wait(0.4) -- tunggu mendarat kembali di atas tombol
+        end
+    end
 end
 
 local function getCash()
@@ -278,8 +305,10 @@ local function doTouch(hrp, part, method)
         firetouchinterest(hrp, part, 1)
     else
         local old = hrp.CFrame
-        hrp.CFrame = standCFrame(part, hrp)
-        task.wait(CONFIG.TouchDelay + 0.15)
+        local target = standCFrame(part, hrp)
+        hrp.CFrame = target
+        task.wait(CONFIG.TouchDelay)
+        nudge(hrp, target, part)
         hrp.CFrame = old
     end
 end
@@ -399,7 +428,7 @@ local COLLECT = {
         end
         fireTouch(hrp, part)
     end,
-    -- 2: teleport ke ATM, sentuh, kembali
+    -- 2: teleport ke ATM, sentuh, gerak kecil, kembali
     [2] = function(hrp)
         local pos = atmPos()
         if not pos then return end
@@ -407,10 +436,12 @@ local COLLECT = {
         hrp.CFrame = CFrame.new(pos + Vector3.new(0, 4, 0))
         local part = findCollector(CONFIG.StreamTimeout + 2)
         if part then
-            hrp.CFrame = standCFrame(part, hrp)
+            local target = standCFrame(part, hrp)
+            hrp.CFrame = target
             task.wait(0.3)
             fireTouch(hrp, part)
-            task.wait(0.5)
+            nudge(hrp, target, part)
+            task.wait(0.3)
         else
             state.CollectStatus = "Collector tidak muncul"
         end
@@ -465,7 +496,9 @@ local function tpNextButton()
     end
     state.TpIndex = state.TpIndex % #list + 1
     local item = list[state.TpIndex]
-    hrp.CFrame = standCFrame(item.part, hrp)
+    local target = standCFrame(item.part, hrp)
+    hrp.CFrame = target
+    nudge(hrp, target, item.part)
     state.Status = ("TP %d/%d: %s"):format(state.TpIndex, #list, item.inst.Name)
 end
 
@@ -566,7 +599,7 @@ local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, -64, 0, 28)
 title.Position = UDim2.fromOffset(8, 0)
 title.BackgroundTransparency = 1
-title.Text = "AutoTycoon v8"
+title.Text = "AutoTycoon v9"
 title.TextColor3 = Color3.fromRGB(235, 235, 235)
 title.TextXAlignment = Enum.TextXAlignment.Left
 title.Font = Enum.Font.GothamBold
@@ -659,7 +692,6 @@ liftLabel.Parent = body
 
 local function setLift(v)
     CONFIG.TpLift = math.floor(v * 10 + 0.5) / 10
-    getgenv().AutoBuyLift = CONFIG.TpLift
     liftLabel.Text = "Tinggi TP: " .. CONFIG.TpLift
 end
 setLift(CONFIG.TpLift)
