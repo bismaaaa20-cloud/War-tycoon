@@ -1,484 +1,180 @@
--- AutoBuy Tycoon v7 (UI + TP raycast + tweak tinggi, auto-detect base)
+-- Rebirth Tester v1 (dry run, tidak membeli apa pun)
 local Players = game:GetService("Players")
-local UIS = game:GetService("UserInputService")
+local RS = game:GetService("ReplicatedStorage")
 local LP = Players.LocalPlayer
 
-getgenv().AutoBuyStop = false
+local CONFIG = {
+    SimLevels = { 0, 1, 2, 3, 5, 10 }, -- level rebirth yang disimulasikan
+    SkipTexts = { "invite", "spinner", "daily reward", "claim", "catalog", "robux", "r$", "medal" },
+    MaxLines  = 120,
+}
 
----------------------------------------------------------------- deteksi base
-local function detectTycoon()
-    for _ = 1, 10 do
-        local ok, tycoons = pcall(function()
-            return workspace:WaitForChild("Tycoon", 10):WaitForChild("Tycoons", 10)
-        end)
-        if ok and tycoons then
-            for _, t in ipairs(tycoons:GetChildren()) do
-                local o = t:FindFirstChild("Owner")
-                if o and o:IsA("ValueBase") and o.Value == LP then
-                    return t
-                end
-            end
-        end
-        task.wait(1)
+local lines = {}
+local function add(s)
+    if #lines < CONFIG.MaxLines then
+        table.insert(lines, s)
+        print("[RBTest]", s)
     end
-    return nil
 end
 
-local tycoon = detectTycoon()
+---------------------------------------------------------------- base
+local tycoon
+for _ = 1, 10 do
+    local ok, tycoons = pcall(function()
+        return workspace:WaitForChild("Tycoon", 10):WaitForChild("Tycoons", 10)
+    end)
+    if ok and tycoons then
+        for _, t in ipairs(tycoons:GetChildren()) do
+            local o = t:FindFirstChild("Owner")
+            if o and o:IsA("ValueBase") and o.Value == LP then tycoon = t break end
+        end
+    end
+    if tycoon then break end
+    task.wait(1)
+end
 if not tycoon then
-    warn("[AutoBuy] Basemu tidak ditemukan. Sudah claim base?")
+    warn("[RBTest] Basemu tidak ditemukan.")
     return
 end
 local folder = tycoon:WaitForChild("UnpurchasedButtons", 10)
 if not folder then
-    warn("[AutoBuy] UnpurchasedButtons tidak ditemukan di", tycoon.Name)
+    warn("[RBTest] UnpurchasedButtons tidak ditemukan.")
     return
 end
+add("Base: " .. tycoon.Name)
 
----------------------------------------------------------------- konfigurasi
-local CONFIG = {
-    Interval      = 0.7,
-    TouchDelay    = 0.2,
-    VerifyDelay   = 0.5,
-    BlacklistTime = 5,
-    UseColorGate  = true,  -- uang tak terbaca: beli hanya tombol hijau
-    TpLift        = getgenv().AutoBuyLift or 0, -- setel lewat tombol - dan + di UI
-    SkipNames     = { "gamepass", "robux", "shield" }, -- huruf kecil
-}
-
-local state = {
-    Enabled = true, Stop = false,
-    Bought = 0, Status = "Siap", TpIndex = 0,
-    Total = 0, Priced = 0, Afford = 0,
-}
-
----------------------------------------------------------------- util
-local function getHRP()
-    local char = LP.Character or LP.CharacterAdded:Wait()
-    return char:WaitForChild("HumanoidRootPart", 10)
-end
-
--- Posisi berdiri tepat di atas permukaan part (tahan rotasi dan bentuk)
-local function standCFrame(part, hrp)
-    local hum = hrp.Parent and hrp.Parent:FindFirstChildOfClass("Humanoid")
-    local hip = 2
-    if hum then
-        hip = (hum.RigType == Enum.HumanoidRigType.R6) and 2 or hum.HipHeight
+---------------------------------------------------------------- baca rebirth
+local function readRebirth()
+    if tonumber(getgenv().AutoBuyRebirth) then
+        return tonumber(getgenv().AutoBuyRebirth), "override manual (getgenv().AutoBuyRebirth)"
     end
-
-    local params = RaycastParams.new()
-    params.FilterType = Enum.RaycastFilterType.Include
-    params.FilterDescendantsInstances = { part }
-    local hit = workspace:Raycast(
-        part.Position + Vector3.new(0, 30, 0), Vector3.new(0, -60, 0), params)
-
-    local topY
-    if hit then
-        topY = hit.Position.Y
-    else
-        local _, _, _, _, _, _, r10, r11, r12 = part.CFrame:GetComponents()
-        topY = part.Position.Y + (math.abs(r10) * part.Size.X
-            + math.abs(r11) * part.Size.Y + math.abs(r12) * part.Size.Z) / 2
-    end
-
-    local rot = hrp.CFrame - hrp.CFrame.Position -- pertahankan arah hadap
-    local pos = Vector3.new(part.Position.X,
-        topY + hip + hrp.Size.Y / 2 + CONFIG.TpLift, part.Position.Z)
-    return CFrame.new(pos) * rot
-end
-
-local function getCash()
     local ls = LP:FindFirstChild("leaderstats")
     if ls then
         for _, v in ipairs(ls:GetChildren()) do
-            local n = v.Name:lower()
-            if (n:find("cash") or n:find("money") or n:find("coin")) and v:IsA("ValueBase") then
-                return tonumber(v.Value)
+            if v:IsA("ValueBase") and v.Name:lower():find("rebirth", 1, true) and tonumber(v.Value) then
+                return tonumber(v.Value), v:GetFullName()
             end
         end
     end
-    for _, key in ipairs({ "Cash", "Money", "Coins" }) do
-        local a = LP:GetAttribute(key)
-        if tonumber(a) then return tonumber(a) end
+    for k, v in pairs(LP:GetAttributes()) do
+        if k:lower():find("rebirth", 1, true) and tonumber(v) then
+            return tonumber(v), "Attribute " .. k
+        end
     end
-    return nil
+    for _, child in ipairs(LP:GetChildren()) do
+        if child.Name ~= "PlayerGui" and child.Name ~= "Backpack" and child.Name ~= "PlayerScripts" then
+            for _, d in ipairs(child:GetDescendants()) do
+                if d:IsA("ValueBase") and d.Name:lower():find("rebirth", 1, true) and tonumber(d.Value) then
+                    return tonumber(d.Value), d:GetFullName()
+                end
+            end
+        end
+    end
+    return nil, "tidak ditemukan"
 end
 
+local rb, src = readRebirth()
+add("== REBIRTH-MU ==")
+add("Nilai: " .. tostring(rb) .. " | Sumber: " .. src)
+
+if rb == nil then
+    add("Mencari kandidat lain di ReplicatedStorage...")
+    local found = 0
+    for i, d in ipairs(RS:GetDescendants()) do
+        if d:IsA("ValueBase") and d.Name:lower():find("rebirth", 1, true) then
+            local inMine = d:GetFullName():find(LP.Name, 1, true) ~= nil
+            add(("  %s = %s%s"):format(d:GetFullName(), tostring(d.Value), inMine and "  <== ada namamu" or ""))
+            found += 1
+            if found >= 8 then break end
+        end
+        if i % 2000 == 0 then task.wait() end
+    end
+    if found == 0 then add("  Tidak ada. Pakai override: getgenv().AutoBuyRebirth = <angka>") end
+end
+
+---------------------------------------------------------------- pembaca tombol
 local SUFFIX = { K = 1e3, M = 1e6, B = 1e9, T = 1e12 }
-local function parseText(text)
+local function parsePrice(text)
+    local low = text:lower()
+    if low:find("r$", 1, true) or low:find("robux", 1, true) or low:find("medal", 1, true) then return nil end
     local num, suf = text:match("%$%s*([%d,%.]+)%s*([KMBTkmbt]?)")
     if not num then return nil end
     local n = tonumber((num:gsub(",", "")))
     return n and n * (SUFFIX[suf:upper()] or 1) or nil
 end
 
-local priceCache = setmetatable({}, { __mode = "k" })
-local function getPrice(inst)
-    if priceCache[inst] then return priceCache[inst] end
-    local price
-    for _, key in ipairs({ "Price", "Cost", "price", "cost" }) do
-        local a = inst:GetAttribute(key)
-        if tonumber(a) then price = tonumber(a) break end
-        local v = inst:FindFirstChild(key)
-        if v and v:IsA("ValueBase") and tonumber(v.Value) then
-            price = tonumber(v.Value) break
-        end
-    end
-    if not price then
-        for _, d in ipairs(inst:GetDescendants()) do
-            if d:IsA("TextLabel") or d:IsA("TextButton") then
-                price = parseText(d.Text)
-                if price then break end
-            end
-        end
-    end
-    if price then priceCache[inst] = price end
-    return price
-end
-
-local function isSkipped(inst)
-    local name = inst.Name:lower()
-    for _, s in ipairs(CONFIG.SkipNames) do
-        if name:find(s, 1, true) then return true end
-    end
-    return false
-end
-
-local function getTouchPart(inst)
-    if inst:IsA("BasePart") then return inst end
-    local fallback
+local function inspect(inst)
+    local info = { name = inst.Name, texts = {}, skip = false }
     for _, d in ipairs(inst:GetDescendants()) do
-        if d:IsA("BasePart") then
-            if d:FindFirstChildOfClass("TouchTransmitter") then return d end
-            fallback = fallback or d
-        end
-    end
-    return (inst:IsA("Model") and inst.PrimaryPart) or fallback
-end
-
-local function isGreen(part)
-    local c = part.Color
-    return c.G > c.R and c.G > c.B
-end
-
-local function listButtons()
-    local list = {}
-    for _, inst in ipairs(folder:GetChildren()) do
-        if not isSkipped(inst) then
-            local part = getTouchPart(inst)
-            if part then
-                table.insert(list, { inst = inst, part = part, price = getPrice(inst) })
+        if d:IsA("TextLabel") or d:IsA("TextButton") then
+            local t = d.Text
+            if t ~= "" then table.insert(info.texts, t) end
+            local low = t:lower()
+            for _, s in ipairs(CONFIG.SkipTexts) do
+                if low:find(s, 1, true) then info.skip = true end
             end
+            info.price = info.price or parsePrice(t)
+            local n = low:match("(%d+)%s*rebirth")
+            if n and not info.req then info.req = tonumber(n) end
+        end
+        local dn = d.Name:lower()
+        if dn:find("medalprice", 1, true) or dn:find("gamepass", 1, true)
+            or dn:find("productid", 1, true) or dn:find("robux", 1, true) then
+            info.skip = true
         end
     end
-    table.sort(list, function(a, b)
-        return (a.price or math.huge) < (b.price or math.huge)
-    end)
-    return list
+    return info
 end
 
----------------------------------------------------------------- beli
-local attempts = {} -- inst -> { method, blockedUntil }
-
-local function doTouch(hrp, part, method)
-    if method == 1 and typeof(firetouchinterest) == "function" then
-        firetouchinterest(hrp, part, 0)
-        task.wait(CONFIG.TouchDelay)
-        firetouchinterest(hrp, part, 1)
-    else
-        local old = hrp.CFrame
-        hrp.CFrame = standCFrame(part, hrp)
-        task.wait(CONFIG.TouchDelay + 0.15)
-        hrp.CFrame = old
+local function decide(info, level)
+    if info.skip then return "SKIP (hadiah/robux/medals)" end
+    if info.req then
+        if level == nil then return "SKIP (rebirth tak terbaca)" end
+        if level < info.req then return ("SKIP (butuh %d, kamu %d)"):format(info.req, level) end
+        return info.price and "AMBIL (syarat terpenuhi)" or "AMBIL (syarat terpenuhi, harga tak diketahui)"
     end
+    if info.price then return "AMBIL (harga uang)" end
+    return "SKIP (tanpa harga)"
 end
 
-local function buy(hrp, item)
-    local st = attempts[item.inst] or { method = 1, blockedUntil = 0 }
-    attempts[item.inst] = st
-    local cashBefore = getCash()
-    state.Status = "Membeli: " .. item.inst.Name
-    local ok, err = pcall(doTouch, hrp, item.part, st.method)
-    if not ok then warn("[AutoBuy] error:", err) end
-    task.wait(CONFIG.VerifyDelay)
+---------------------------------------------------------------- laporan
+local infos = {}
+for _, inst in ipairs(folder:GetChildren()) do
+    table.insert(infos, inspect(inst))
+end
+table.sort(infos, function(a, b) return (a.req or 0) > (b.req or 0) end)
 
-    local after = getCash()
-    if item.inst.Parent ~= folder or (cashBefore and after and after < cashBefore) then
-        state.Bought += 1
-        state.Status = "Terbeli: " .. item.inst.Name
-        attempts[item.inst] = nil
-        return
-    end
-    if st.method == 1 then
-        st.method = 2
-    else
-        st.method = 1
-        st.blockedUntil = os.clock() + CONFIG.BlacklistTime
-        state.Status = "Belum bisa: " .. item.inst.Name
+add("== TOMBOL BERSYARAT REBIRTH ==")
+local gated = {}
+for _, info in ipairs(infos) do
+    if info.req then
+        table.insert(gated, info)
+        add(("%s | butuh %d | harga %s | %s"):format(
+            info.name, info.req, tostring(info.price or "tak ada"), decide(info, rb)))
     end
 end
+if #gated == 0 then add("Tidak ada tombol bersyarat rebirth di folder ini.") end
 
-local function step()
-    local hrp = getHRP()
-    if not hrp then return end
-    local cash = getCash()
-    local now = os.clock()
+add("== RINGKASAN KEPUTUSAN (rebirth saat ini) ==")
+local count = { take = 0, skip = 0 }
+for _, info in ipairs(infos) do
+    if decide(info, rb):sub(1, 5) == "AMBIL" then count.take += 1 else count.skip += 1 end
+end
+add(("Total tombol: %d | diambil: %d | dilewati: %d"):format(#infos, count.take, count.skip))
 
-    local list = listButtons()
-    state.Total = #folder:GetChildren()
-    state.Priced = 0
-
-    local candidates = {}
-    for _, item in ipairs(list) do
-        if item.price then
-            state.Priced += 1
-            local st = attempts[item.inst]
-            if not (st and st.blockedUntil > now) then
-                local afford
-                if cash ~= nil then
-                    afford = cash >= item.price
-                else
-                    afford = (not CONFIG.UseColorGate) or isGreen(item.part)
-                end
-                if afford then table.insert(candidates, item) end
-            end
+if #gated > 0 then
+    add("== SIMULASI LEVEL REBIRTH ==")
+    for _, level in ipairs(CONFIG.SimLevels) do
+        local open = {}
+        for _, info in ipairs(gated) do
+            if not info.skip and level >= info.req then table.insert(open, info.name) end
         end
-    end
-    state.Afford = #candidates
-
-    if #candidates == 0 then
-        state.Status = "Menunggu uang / tombol"
-        return
-    end
-    for _, item in ipairs(candidates) do
-        if not state.Enabled or state.Stop or getgenv().AutoBuyStop then return end
-        if item.inst.Parent == folder then
-            local c = getCash()
-            if c == nil or c >= item.price then
-                hrp = getHRP() or hrp
-                buy(hrp, item)
-            end
-        end
+        add(("Rebirth %d -> terbuka: %s"):format(level,
+            #open > 0 and table.concat(open, ", ") or "(tidak ada)"))
     end
 end
 
----------------------------------------------------------------- teleport
-local function tpNextButton()
-    local hrp = getHRP()
-    if not hrp then return end
-    local list = listButtons()
-    if #list == 0 then
-        state.Status = "Tidak ada tombol"
-        return
-    end
-    state.TpIndex = state.TpIndex % #list + 1
-    local item = list[state.TpIndex]
-    hrp.CFrame = standCFrame(item.part, hrp)
-    state.Status = ("TP %d/%d: %s"):format(state.TpIndex, #list, item.inst.Name)
+if typeof(setclipboard) == "function" then
+    setclipboard(table.concat(lines, "\n"))
+    print("[RBTest] Laporan disalin ke clipboard, tempel ke chat.")
 end
-
-local function tpBase()
-    local hrp = getHRP()
-    if not hrp then return end
-    local target
-    local ess = tycoon:FindFirstChild("Essentials")
-    local sp = ess and ess:FindFirstChild("BaseSpawn")
-    if sp and sp:IsA("BasePart") then
-        target = standCFrame(sp, hrp)
-    else
-        local ok, cf = pcall(function() return tycoon:GetPivot() end)
-        if ok then target = cf + Vector3.new(0, 6, 0) end
-    end
-    if target then
-        hrp.CFrame = target
-        state.Status = "TP ke base " .. tycoon.Name
-    else
-        state.Status = "Posisi base tidak ditemukan"
-    end
-end
-
----------------------------------------------------------------- UI
-local parentGui
-do
-    local ok, p = pcall(function()
-        return (typeof(gethui) == "function" and gethui()) or game:GetService("CoreGui")
-    end)
-    parentGui = ok and p or LP:WaitForChild("PlayerGui")
-end
-local old = parentGui:FindFirstChild("AutoBuyUI")
-if old then old:Destroy() end
-
-local gui = Instance.new("ScreenGui")
-gui.Name = "AutoBuyUI"
-gui.ResetOnSpawn = false
-gui.DisplayOrder = 999
-local okParent = pcall(function() gui.Parent = parentGui end)
-if not okParent or not gui.Parent then gui.Parent = LP:WaitForChild("PlayerGui") end
-
-local FULL_H = 322
-local frame = Instance.new("Frame")
-frame.Size = UDim2.fromOffset(236, FULL_H)
-frame.Position = UDim2.new(0, 10, 0.2, 0)
-frame.BackgroundColor3 = Color3.fromRGB(24, 26, 32)
-frame.BorderSizePixel = 0
-frame.Parent = gui
-Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
-
-local title = Instance.new("TextLabel")
-title.Size = UDim2.new(1, -64, 0, 28)
-title.Position = UDim2.fromOffset(8, 0)
-title.BackgroundTransparency = 1
-title.Text = "AutoBuy v7"
-title.TextColor3 = Color3.fromRGB(235, 235, 235)
-title.TextXAlignment = Enum.TextXAlignment.Left
-title.Font = Enum.Font.GothamBold
-title.TextSize = 14
-title.Parent = frame
-
-local body = Instance.new("Frame")
-body.Size = UDim2.new(1, 0, 1, -28)
-body.Position = UDim2.fromOffset(0, 28)
-body.BackgroundTransparency = 1
-body.Parent = frame
-
-local function mkButton(text, y, color, callback)
-    local b = Instance.new("TextButton")
-    b.Size = UDim2.new(1, -16, 0, 30)
-    b.Position = UDim2.fromOffset(8, y)
-    b.BackgroundColor3 = color
-    b.Text = text
-    b.TextColor3 = Color3.new(1, 1, 1)
-    b.Font = Enum.Font.GothamSemibold
-    b.TextSize = 13
-    b.Parent = body
-    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
-    b.MouseButton1Click:Connect(callback)
-    return b
-end
-
-local info = Instance.new("TextLabel")
-info.Size = UDim2.new(1, -16, 0, 92)
-info.Position = UDim2.fromOffset(8, 4)
-info.BackgroundTransparency = 1
-info.TextColor3 = Color3.fromRGB(190, 195, 205)
-info.TextXAlignment = Enum.TextXAlignment.Left
-info.TextYAlignment = Enum.TextYAlignment.Top
-info.TextWrapped = true
-info.Font = Enum.Font.Gotham
-info.TextSize = 12
-info.Parent = body
-
-local toggleBtn
-toggleBtn = mkButton("AutoBuy: ON", 100, Color3.fromRGB(46, 160, 90), function()
-    state.Enabled = not state.Enabled
-    toggleBtn.Text = "AutoBuy: " .. (state.Enabled and "ON" or "OFF")
-    toggleBtn.BackgroundColor3 = state.Enabled
-        and Color3.fromRGB(46, 160, 90) or Color3.fromRGB(150, 60, 60)
-end)
-mkButton("TP ke Tombol Berikutnya", 136, Color3.fromRGB(52, 110, 190), tpNextButton)
-mkButton("TP ke Base", 172, Color3.fromRGB(80, 90, 110), tpBase)
-mkButton("Tutup dan Stop", 208, Color3.fromRGB(150, 60, 60), function()
-    state.Stop = true
-    getgenv().AutoBuyStop = true
-    gui:Destroy()
-end)
-
--- Tweak tinggi TP (live): tombol - dan +
-local function mkSmall(text, pos, callback)
-    local b = Instance.new("TextButton")
-    b.Size = UDim2.fromOffset(40, 30)
-    b.Position = pos
-    b.BackgroundColor3 = Color3.fromRGB(70, 76, 92)
-    b.Text = text
-    b.TextColor3 = Color3.new(1, 1, 1)
-    b.Font = Enum.Font.GothamBold
-    b.TextSize = 18
-    b.Parent = body
-    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
-    b.MouseButton1Click:Connect(callback)
-    return b
-end
-
-local liftLabel = Instance.new("TextLabel")
-liftLabel.Size = UDim2.new(1, -104, 0, 30)
-liftLabel.Position = UDim2.fromOffset(52, 244)
-liftLabel.BackgroundTransparency = 1
-liftLabel.TextColor3 = Color3.fromRGB(220, 224, 232)
-liftLabel.Font = Enum.Font.GothamSemibold
-liftLabel.TextSize = 12
-liftLabel.Parent = body
-
-local function setLift(v)
-    CONFIG.TpLift = math.floor(v * 10 + 0.5) / 10
-    getgenv().AutoBuyLift = CONFIG.TpLift
-    liftLabel.Text = "Tinggi TP: " .. CONFIG.TpLift
-end
-setLift(CONFIG.TpLift)
-
-mkSmall("-", UDim2.fromOffset(8, 244), function() setLift(CONFIG.TpLift - 0.2) end)
-mkSmall("+", UDim2.new(1, -48, 0, 244), function() setLift(CONFIG.TpLift + 0.2) end)
-
-local miniBtn = Instance.new("TextButton")
-miniBtn.Size = UDim2.fromOffset(26, 22)
-miniBtn.Position = UDim2.new(1, -34, 0, 3)
-miniBtn.BackgroundColor3 = Color3.fromRGB(50, 54, 64)
-miniBtn.Text = "-"
-miniBtn.TextColor3 = Color3.new(1, 1, 1)
-miniBtn.Font = Enum.Font.GothamBold
-miniBtn.TextSize = 16
-miniBtn.Parent = frame
-Instance.new("UICorner", miniBtn).CornerRadius = UDim.new(0, 5)
-local minimized = false
-miniBtn.MouseButton1Click:Connect(function()
-    minimized = not minimized
-    body.Visible = not minimized
-    frame.Size = minimized and UDim2.fromOffset(236, 28) or UDim2.fromOffset(236, FULL_H)
-    miniBtn.Text = minimized and "+" or "-"
-end)
-
--- geser jendela lewat judul (mouse dan sentuhan)
-do
-    local dragging, dragStart, startPos
-    title.Active = true
-    title.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1
-            or input.UserInputType == Enum.UserInputType.Touch then
-            dragging, dragStart, startPos = true, input.Position, frame.Position
-            input.Changed:Connect(function()
-                if input.UserInputState == Enum.UserInputState.End then dragging = false end
-            end)
-        end
-    end)
-    UIS.InputChanged:Connect(function(input)
-        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
-            or input.UserInputType == Enum.UserInputType.Touch) then
-            local d = input.Position - dragStart
-            frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X,
-                startPos.Y.Scale, startPos.Y.Offset + d.Y)
-        end
-    end)
-end
-
----------------------------------------------------------------- loop
-task.spawn(function() -- refresh status
-    while gui.Parent and not state.Stop do
-        local cash = getCash()
-        info.Text = ("Base: %s | Terbeli: %d\nUang: %s\nTombol: %d | berharga: %d | mampu: %d\nStatus: %s"):format(
-            tycoon.Name, state.Bought,
-            cash and tostring(cash) or "tak terbaca (pakai warna)",
-            state.Total, state.Priced, state.Afford, state.Status)
-        task.wait(0.5)
-    end
-end)
-
-task.spawn(function() -- loop beli
-    while not state.Stop and not getgenv().AutoBuyStop do
-        if state.Enabled then
-            local ok, err = pcall(step)
-            if not ok then warn("[AutoBuy] error:", err) end
-        else
-            state.Status = "OFF"
-        end
-        task.wait(CONFIG.Interval)
-    end
-end)
